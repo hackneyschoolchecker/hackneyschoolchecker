@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hackney Primary School Admission Checker (2018-2025)</title>
+    <!-- Leaflet CSS for map rendering -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Proj4js for coordinate conversion -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.7.5/proj4.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-tap-highlight-color: transparent; /* Removes blue tap highlight on mobile */
+        }
+        /* --- Mobile App Transformation Styles --- */
+        /* On screens smaller than 768px (md breakpoint in Tailwind), transform the table into cards */
+        @media (max-width: 767px) {
+            /* Hide the table header on mobile */
+            .results-table thead {
+                display: none;
+            }
+            /* Make each table row a block-level card */
+            .results-table tr {
+                display: block;
+                margin-bottom: 1rem;
+                border: 1px solid #e5e7eb;
+                border-radius: 0.75rem;
+                box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+                overflow: hidden;
+            }
+            /* The first cell (school name) acts as the card header */
+            .results-table td:first-child {
+                background-color: #f9fafb;
+                font-weight: 600;
+                padding: 0.75rem 1rem;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            /* Make all other cells display as blocks */
+            .results-table td {
+                display: block;
+                text-align: right;
+                padding: 0.5rem 1rem;
+                border-bottom: 1px solid #f3f4f6;
+            }
+            .results-table td:last-child {
+                border-bottom: 0;
+            }
+            /* Use the data-label attribute to create a label for each cell */
+            .results-table td::before {
+                content: attr(data-label);
+                float: left;
+                font-weight: 500;
+                color: #4b5563;
+            }
+             /* The distance cell is styled like the header */
+            .results-table td:nth-child(2) {
+                 font-weight: 600;
+            }
+        }
+
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: #09f;
+            animation: spin 1s ease infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .leaflet-popup-content-wrapper {
+            border-radius: 8px;
+        }
+        .school-popup-name {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div class="container mx-auto p-4 max-w-7xl">
+        <div class="text-center mb-6">
+            <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">Hackney Primary School Checker</h1>
+            <p class="mt-2 text-md text-gray-600">Check historical admission data (2018-2025)</p>
+        </div>
+
+        <div class="bg-white p-4 sm:p-6 rounded-2xl shadow-lg">
+            <div class="flex flex-col sm:flex-row gap-4 items-end">
+                <div class="w-full">
+                    <label for="address" class="block text-sm font-medium text-gray-700 mb-1">Your Hackney Address</label>
+                    <input type="text" id="address" placeholder="e.g., 123 Hackney Road, E8 3DL" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-base">
+                </div>
+                <div class="w-full sm:w-auto flex-shrink-0">
+                    <button id="check-button" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out text-base">
+                        Check Admissions
+                    </button>
+                </div>
+            </div>
+            <div id="error-message" class="text-red-600 mt-3 text-sm hidden"></div>
+        </div>
+
+        <div id="loading" class="text-center my-8 hidden">
+             <div class="spinner mx-auto"></div>
+             <p class="mt-2 text-gray-600">Fetching data and calculating distances...</p>
+        </div>
+
+        <div id="results-container" class="mt-6"></div>
+        <!-- Map height is now responsive -->
+        <div id="map" class="hidden h-[400px] md:h-[500px] w-full rounded-2xl shadow-lg mt-6 z-10"></div>
+    </div>
+
+    <!-- Leaflet JS for map rendering -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script>
+        // --- SCRIPT INITIALIZATION ---
+        // We wrap the entire application logic in a function that is called by window.onload.
+        // This is a robust way to prevent "race conditions" where the script tries to execute
+        // before all necessary resources (like the proj4.js library) are fully loaded,
+        // which is a common issue on mobile devices.
+        
+        function initializeApp() {
+            // --- Explicitly define the British National Grid projection for Proj4js ---
+            proj4.defs("EPSG:27700", "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +datum=OSGB36 +units=m +no_defs");
+
+            // --- DATA SOURCE ---
+            const schoolData = [
+                { name: "Baden Powell School", easting: 534738, northing: 186059, years: { "2025": {cutoff: Infinity, distanceOffers: NaN}, "2024": {cutoff: Infinity, distanceOffers: NaN}, "2023": {cutoff: 7.723, distanceOffers: 9}, "2022": {cutoff: Infinity, distanceOffers: 11}, "2021": {cutoff: Infinity, distanceOffers: 11}, "2020": {cutoff: 0.528, distanceOffers: 16}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Benthal Primary School", easting: 534224, northing: 186153, years: { "2025": {cutoff: 3.4, distanceOffers: 11}, "2024": {cutoff: 1.44, distanceOffers: 12}, "2023": {cutoff: 2.434, distanceOffers: 12}, "2022": {cutoff: Infinity, distanceOffers: 12}, "2021": {cutoff: Infinity, distanceOffers: 15}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Berger Primary School", easting: 535671, northing: 184827, years: { "2025": {cutoff: 3.663, distanceOffers: 28}, "2024": {cutoff: 5.611, distanceOffers: 33}, "2023": {cutoff: 6.944, distanceOffers: 37}, "2022": {cutoff: Infinity, distanceOffers: 16}, "2021": {cutoff: Infinity, distanceOffers: 31}, "2020": {cutoff: 0.274, distanceOffers: 36}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Betty Layward Primary School", easting: 532843, northing: 186101, years: { "2025": {cutoff: 0.229, distanceOffers: 29}, "2024": {cutoff: 0.305, distanceOffers: 31}, "2023": {cutoff: 0.339, distanceOffers: 35}, "2022": {cutoff: 0.38, distanceOffers: 43}, "2021": {cutoff: 0.381, distanceOffers: 37}, "2020": {cutoff: 0.352, distanceOffers: 37}, "2019": {cutoff: 0.305, distanceOffers: 33}, "2018": {cutoff: 0.486, distanceOffers: 47} } },
+                { name: "Colvestone Primary School", easting: 533631, northing: 185118, years: { "2025": {cutoff: Infinity, distanceOffers: NaN}, "2024": {cutoff: Infinity, distanceOffers: NaN}, "2023": {cutoff: 1.802, distanceOffers: 8}, "2022": {cutoff: Infinity, distanceOffers: 10}, "2021": {cutoff: Infinity, distanceOffers: 18}, "2020": {cutoff: 0.403, distanceOffers: 22}, "2019": {cutoff: 0.526, distanceOffers: 16}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Daubeney Primary School", easting: 536126, northing: 185583, years: { "2025": {cutoff: 6.599, distanceOffers: 30}, "2024": {cutoff: 1.037, distanceOffers: 35}, "2023": {cutoff: 0.671, distanceOffers: 16}, "2022": {cutoff: Infinity, distanceOffers: 38}, "2021": {cutoff: Infinity, distanceOffers: 25}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "De Beauvoir Primary School", easting: 533644, northing: 184605, years: { "2025": {cutoff: Infinity, distanceOffers: NaN}, "2024": {cutoff: Infinity, distanceOffers: NaN}, "2023": {cutoff: 1.362, distanceOffers: 6}, "2022": {cutoff: Infinity, distanceOffers: 1}, "2021": {cutoff: Infinity, distanceOffers: 6}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Gainsborough Primary School", easting: 536980, northing: 184834, years: { "2025": {cutoff: 8.332, distanceOffers: 19}, "2024": {cutoff: 1.576, distanceOffers: 12}, "2023": {cutoff: 3.518, distanceOffers: 12}, "2022": {cutoff: Infinity, distanceOffers: 13}, "2021": {cutoff: Infinity, distanceOffers: 8}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Gayhurst Community School", easting: 534450, northing: 184386, years: { "2025": {cutoff: 0.314, distanceOffers: 36}, "2024": {cutoff: 0.402, distanceOffers: 44}, "2023": {cutoff: 0.297, distanceOffers: 28}, "2022": {cutoff: 0.281, distanceOffers: 27}, "2021": {cutoff: 0.339, distanceOffers: 49}, "2020": {cutoff: 0.265, distanceOffers: 43}, "2019": {cutoff: 0.392, distanceOffers: 49}, "2018": {cutoff: 0.248, distanceOffers: 30} } },
+                { name: "Grasmere Primary School", easting: 532960, northing: 185754, years: { "2025": {cutoff: 0.236, distanceOffers: 18}, "2024": {cutoff: 0.331, distanceOffers: 25}, "2023": {cutoff: 0.297, distanceOffers: 20}, "2022": {cutoff: 0.417, distanceOffers: 19}, "2021": {cutoff: 0.38, distanceOffers: 16}, "2020": {cutoff: 0.3, distanceOffers: 20}, "2019": {cutoff: 0.197, distanceOffers: 17}, "2018": {cutoff: 0.374, distanceOffers: 20} } },
+                { name: "Grazebrook Primary School", easting: 532963, northing: 186776, years: { "2025": {cutoff: 0.417, distanceOffers: 34}, "2024": {cutoff: 0.439, distanceOffers: 35}, "2023": {cutoff: 0.283, distanceOffers: 33}, "2022": {cutoff: 0.557, distanceOffers: 37}, "2021": {cutoff: 0.599, distanceOffers: 34}, "2020": {cutoff: 0.41, distanceOffers: 34}, "2019": {cutoff: 0.28, distanceOffers: 36}, "2018": {cutoff: 0.28, distanceOffers: 35} } },
+                { name: "Harrington Hill Primary School", easting: 534968, northing: 187170, years: { "2025": {cutoff: 6.438, distanceOffers: 12}, "2024": {cutoff: 0.48, distanceOffers: 11}, "2023": {cutoff: 0.826, distanceOffers: 11}, "2022": {cutoff: Infinity, distanceOffers: 8}, "2021": {cutoff: Infinity, distanceOffers: 10}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Holmleigh Primary School", easting: 533510, northing: 187449, years: { "2025": {cutoff: 1.158, distanceOffers: 21}, "2024": {cutoff: 1.103, distanceOffers: 24}, "2023": {cutoff: 1.689, distanceOffers: 26}, "2022": {cutoff: 0.478, distanceOffers: 16}, "2021": {cutoff: 1.15, distanceOffers: 22}, "2020": {cutoff: 0.304, distanceOffers: 16}, "2019": {cutoff: 0.969, distanceOffers: 17}, "2018": {cutoff: 0.286, distanceOffers: 15} } },
+                { name: "Hoxton Garden Primary School", easting: 533283, northing: 183577, years: { "2025": {cutoff: 3.463, distanceOffers: 17}, "2024": {cutoff: 0.394, distanceOffers: 13}, "2023": {cutoff: 1.467, distanceOffers: 13}, "2022": {cutoff: Infinity, distanceOffers: 20}, "2021": {cutoff: Infinity, distanceOffers: 35}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Jubilee Primary School", easting: 534149, northing: 187016, years: { "2025": {cutoff: 0.338, distanceOffers: 35}, "2024": {cutoff: 0.886, distanceOffers: 33}, "2023": {cutoff: 5.707, distanceOffers: 36}, "2022": {cutoff: 0.394, distanceOffers: 35}, "2021": {cutoff: 0.604, distanceOffers: 31}, "2020": {cutoff: 0.386, distanceOffers: 29}, "2019": {cutoff: 0.452, distanceOffers: 35}, "2018": {cutoff: 0.429, distanceOffers: 37} } },
+                { name: "Kingsmead Primary School", easting: 536310, northing: 185685, years: { "2025": {cutoff: 1.634, distanceOffers: 20}, "2024": {cutoff: 0.522, distanceOffers: 15}, "2023": {cutoff: 0.261, distanceOffers: 15}, "2022": {cutoff: 0.249, distanceOffers: 19}, "2021": {cutoff: 0.182, distanceOffers: 17}, "2020": {cutoff: 0.161, distanceOffers: 18}, "2019": {cutoff: 0.394, distanceOffers: 16}, "2018": {cutoff: 1.23, distanceOffers: 19} } },
+                { name: "Lauriston School", easting: 535636, northing: 183779, years: { "2025": {cutoff: 0.776, distanceOffers: 42}, "2024": {cutoff: 0.75, distanceOffers: 42}, "2023": {cutoff: 0.843, distanceOffers: 40}, "2022": {cutoff: Infinity, distanceOffers: 29}, "2021": {cutoff: Infinity, distanceOffers: 25}, "2020": {cutoff: 0.472, distanceOffers: 37}, "2019": {cutoff: 0.451, distanceOffers: 34}, "2018": {cutoff: 0.614, distanceOffers: 37} } },
+                { name: "London Fields Primary School", easting: 534642, northing: 183828, years: { "2025": {cutoff: 0.647, distanceOffers: 29}, "2024": {cutoff: 6.481, distanceOffers: 36}, "2023": {cutoff: 0.428, distanceOffers: 37}, "2022": {cutoff: 0.46, distanceOffers: 30}, "2021": {cutoff: 0.345, distanceOffers: 32}, "2020": {cutoff: 0.359, distanceOffers: 39}, "2019": {cutoff: 0.516, distanceOffers: 42}, "2018": {cutoff: 0.581, distanceOffers: 41} } },
+                { name: "Mandeville Primary School", easting: 536002, northing: 186066, years: { "2025": {cutoff: 2.578, distanceOffers: 28}, "2024": {cutoff: 0.847, distanceOffers: 16}, "2023": {cutoff: 0.991, distanceOffers: 21}, "2022": {cutoff: Infinity, distanceOffers: 21}, "2021": {cutoff: Infinity, distanceOffers: 14}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Millfields Community School", easting: 535218, northing: 185910, years: { "2025": {cutoff: 352.024, distanceOffers: 48}, "2024": {cutoff: 180.137, distanceOffers: 42}, "2023": {cutoff: 0.614, distanceOffers: 56}, "2022": {cutoff: 0.358, distanceOffers: 44}, "2021": {cutoff: 0.605, distanceOffers: 52}, "2020": {cutoff: 0.551, distanceOffers: 64}, "2019": {cutoff: 0.353, distanceOffers: 46}, "2018": {cutoff: 0.478, distanceOffers: 66} } },
+                { name: "Morningside Primary School", easting: 535292, northing: 184869, years: { "2025": {cutoff: 2.539, distanceOffers: 24}, "2024": {cutoff: 2.662, distanceOffers: 25}, "2023": {cutoff: 2.308, distanceOffers: 34}, "2022": {cutoff: Infinity, distanceOffers: 24}, "2021": {cutoff: Infinity, distanceOffers: 27}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Nightingale Primary School", easting: 534594, northing: 185895, years: { "2025": {cutoff: 1.246, distanceOffers: 38}, "2024": {cutoff: 2.683, distanceOffers: 28}, "2023": {cutoff: 0.395, distanceOffers: 19}, "2022": {cutoff: 3.403, distanceOffers: 19}, "2021": {cutoff: 0.454, distanceOffers: 17}, "2020": {cutoff: 0.294, distanceOffers: 20}, "2019": {cutoff: 2.512, distanceOffers: 22}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Oldhill Community School", easting: 534438, northing: 187129, years: { "2025": {cutoff: 0, distanceOffers: 0}, "2024": {cutoff: 1.149, distanceOffers: 15}, "2023": {cutoff: 1.385, distanceOffers: 7}, "2022": {cutoff: Infinity, distanceOffers: 14}, "2021": {cutoff: Infinity, distanceOffers: NaN}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Orchard Primary School", easting: 536340, northing: 184510, years: { "2025": {cutoff: 1.283, distanceOffers: 22}, "2024": {cutoff: 2.865, distanceOffers: 27}, "2023": {cutoff: 10.015, distanceOffers: 31}, "2022": {cutoff: Infinity, distanceOffers: 54}, "2021": {cutoff: 0.716, distanceOffers: 53}, "2020": {cutoff: 0.672, distanceOffers: 54}, "2019": {cutoff: 1.271, distanceOffers: 57}, "2018": {cutoff: 0.393, distanceOffers: 50} } },
+                { name: "Parkwood Primary School", easting: 532055, northing: 187796, years: { "2025": {cutoff: 0.861, distanceOffers: 18}, "2024": {cutoff: 350.244, distanceOffers: 21}, "2023": {cutoff: 0.94, distanceOffers: 17}, "2022": {cutoff: Infinity, distanceOffers: 21}, "2021": {cutoff: 0.287, distanceOffers: 14}, "2020": {cutoff: 0.311, distanceOffers: 23}, "2019": {cutoff: 0.255, distanceOffers: 24}, "2018": {cutoff: 0.481, distanceOffers: 18} } },
+                { name: "Princess May Primary School", easting: 533518, northing: 185502, years: { "2025": {cutoff: 350.975, distanceOffers: 16}, "2024": {cutoff: 0.823, distanceOffers: 8}, "2023": {cutoff: 1.502, distanceOffers: 14}, "2022": {cutoff: Infinity, distanceOffers: 12}, "2021": {cutoff: Infinity, distanceOffers: 13}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Queensbridge Primary School", easting: 534063, northing: 184718, years: { "2025": {cutoff: 350.914, distanceOffers: 41}, "2024": {cutoff: 0.67, distanceOffers: 40}, "2023": {cutoff: 0.974, distanceOffers: 43}, "2022": {cutoff: 2.486, distanceOffers: 42}, "2021": {cutoff: 0.654, distanceOffers: 36}, "2020": {cutoff: 0.427, distanceOffers: 28}, "2019": {cutoff: 0.596, distanceOffers: 42}, "2018": {cutoff: 0.494, distanceOffers: 35} } },
+                { name: "Randal Cremer Primary School", easting: 532909, northing: 183921, years: { "2025": {cutoff: Infinity, distanceOffers: NaN}, "2024": {cutoff: Infinity, distanceOffers: NaN}, "2023": {cutoff: 0.878, distanceOffers: 8}, "2022": {cutoff: Infinity, distanceOffers: 13}, "2021": {cutoff: Infinity, distanceOffers: 14}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Rushmore Primary School", easting: 535926, northing: 185848, years: { "2025": {cutoff: 0.466, distanceOffers: 39}, "2024": {cutoff: 8.009, distanceOffers: 29}, "2023": {cutoff: 0.257, distanceOffers: 28}, "2022": {cutoff: 0.218, distanceOffers: 26}, "2021": {cutoff: 0.443, distanceOffers: 34}, "2020": {cutoff: 0.204, distanceOffers: 43}, "2019": {cutoff: 0.206, distanceOffers: 28}, "2018": {cutoff: 0.225, distanceOffers: 28} } },
+                { name: "Sebright School", easting: 534015, northing: 184107, years: { "2025": {cutoff: 0.546, distanceOffers: 36}, "2024": {cutoff: 1.216, distanceOffers: 26}, "2023": {cutoff: 8.241, distanceOffers: 39}, "2022": {cutoff: Infinity, distanceOffers: 35}, "2021": {cutoff: 0.761, distanceOffers: 35}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Shacklewell Primary School", easting: 533714, northing: 185576, years: { "2025": {cutoff: 0.322, distanceOffers: 42}, "2024": {cutoff: 0.434, distanceOffers: 36}, "2023": {cutoff: 0.268, distanceOffers: 37}, "2022": {cutoff: 0.354, distanceOffers: 35}, "2021": {cutoff: 0.245, distanceOffers: 34}, "2020": {cutoff: 0.254, distanceOffers: 28}, "2019": {cutoff: 0.377, distanceOffers: 41}, "2018": {cutoff: 1.683, distanceOffers: 37} } },
+                { name: "Shoreditch Park Primary School", easting: 532915, northing: 184104, years: { "2025": {cutoff: 0.493, distanceOffers: 43}, "2024": {cutoff: 2.304, distanceOffers: 40}, "2023": {cutoff: 0.332, distanceOffers: 32}, "2022": {cutoff: 0.41, distanceOffers: 35}, "2021": {cutoff: 0.498, distanceOffers: 36}, "2020": {cutoff: 0.329, distanceOffers: 44}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: 0.517, distanceOffers: 39} } },
+                { name: "Sir Thomas Abney School", easting: 533211, northing: 186877, years: { "2025": {cutoff: 2.757, distanceOffers: 4}, "2024": {cutoff: 2.207, distanceOffers: 16}, "2023": {cutoff: 1.08, distanceOffers: 9}, "2022": {cutoff: Infinity, distanceOffers: 14}, "2021": {cutoff: Infinity, distanceOffers: 17}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Southwold Primary School", easting: 535398, northing: 186638, years: { "2025": {cutoff: 0.501, distanceOffers: 14}, "2024": {cutoff: 2.28, distanceOffers: 25}, "2023": {cutoff: 1.774, distanceOffers: 22}, "2022": {cutoff: 1.294, distanceOffers: 33}, "2021": {cutoff: Infinity, distanceOffers: 39}, "2020": {cutoff: 1.172, distanceOffers: 42}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Springfield Community Primary School", easting: 534919, northing: 186981, years: { "2025": {cutoff: 1.051, distanceOffers: 16}, "2024": {cutoff: 6.489, distanceOffers: 12}, "2023": {cutoff: 0.896, distanceOffers: 15}, "2022": {cutoff: Infinity, distanceOffers: 20}, "2021": {cutoff: 1.944, distanceOffers: 21}, "2020": {cutoff: 0.825, distanceOffers: 21}, "2019": {cutoff: 0.253, distanceOffers: 16}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Thomas Fairchild Community School", easting: 533202, northing: 183707, years: { "2025": {cutoff: 0.377, distanceOffers: 13}, "2024": {cutoff: 1.609, distanceOffers: 17}, "2023": {cutoff: 9.1, distanceOffers: 15}, "2022": {cutoff: Infinity, distanceOffers: 16}, "2021": {cutoff: Infinity, distanceOffers: 9}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "Tyssen Community Primary School", easting: 533948, northing: 187214, years: { "2025": {cutoff: Infinity, distanceOffers: NaN}, "2024": {cutoff: Infinity, distanceOffers: NaN}, "2023": {cutoff: Infinity, distanceOffers: NaN}, "2022": {cutoff: Infinity, distanceOffers: NaN}, "2021": {cutoff: Infinity, distanceOffers: 23}, "2020": {cutoff: Infinity, distanceOffers: NaN}, "2019": {cutoff: Infinity, distanceOffers: NaN}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+                { name: "William Patten Primary School", easting: 533537, northing: 186525, years: { "2025": {cutoff: 0.231, distanceOffers: 29}, "2024": {cutoff: 0.422, distanceOffers: 37}, "2023": {cutoff: 0.365, distanceOffers: 36}, "2022": {cutoff: 0.207, distanceOffers: 33}, "2021": {cutoff: 0.475, distanceOffers: 36}, "2020": {cutoff: 0.227, distanceOffers: 26}, "2019": {cutoff: 0.277, distanceOffers: 33}, "2018": {cutoff: 0.206, distanceOffers: 38} } },
+                { name: "Woodberry Down Community Primary School", easting: 531998, northing: 187896, years: { "2025": {cutoff: 2.906, distanceOffers: 37}, "2024": {cutoff: 2.862, distanceOffers: 47}, "2023": {cutoff: 3.191, distanceOffers: 45}, "2022": {cutoff: Infinity, distanceOffers: 61}, "2021": {cutoff: 1.699, distanceOffers: 49}, "2020": {cutoff: 0.263, distanceOffers: 50}, "2019": {cutoff: 0.436, distanceOffers: 57}, "2018": {cutoff: Infinity, distanceOffers: NaN} } },
+            ];
+
+            // --- DOM Elements ---
+            const addressInput = document.getElementById('address');
+            const checkButton = document.getElementById('check-button');
+            const resultsContainer = document.getElementById('results-container');
+            const errorMessage = document.getElementById('error-message');
+            const loadingIndicator = document.getElementById('loading');
+            const mapContainer = document.getElementById('map');
+            let map = null;
+            
+            // --- Main Handler ---
+            async function handleCheck() {
+                const address = addressInput.value.trim();
+                if (!address) {
+                    showError("Please enter a Hackney address.");
+                    return;
+                }
+                hideError();
+                showLoading(true);
+                resultsContainer.innerHTML = '';
+                mapContainer.classList.add('hidden');
+
+                try {
+                    const userLocation = await getCoordsFromAddress(address);
+                    if (!userLocation) return; 
+                    const schoolsWithDistances = calculateDistances(userLocation.bng, schoolData);
+                    displayResults(schoolsWithDistances);
+                    initMap(userLocation.latlon, schoolsWithDistances);
+                } catch (error) {
+                    console.error("Error during check:", error);
+                    showError(error.message);
+                    resultsContainer.innerHTML = '';
+                } finally {
+                    showLoading(false);
+                }
+            }
+            
+            // --- Geocoding Logic ---
+            async function getCoordsFromAddress(address) {
+                const fullAddressQuery = address.toLowerCase().includes('hackney') ? address : `${address}, Hackney, London`;
+                const response = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fullAddressQuery)}&format=json&limit=1&countrycodes=gb`);
+                if (!response.ok) throw new Error("Geocoding service is unavailable. Please try again later.");
+                const data = await response.json();
+                if (data.length === 0) throw new Error("Address not found. Please try a more specific address, including a postcode.");
+                
+                const lon = parseFloat(data[0].lon);
+                const lat = parseFloat(data[0].lat);
+
+                // Convert WGS84 (lat/lon) from API to OSGB36/BNG (easting/northing) for distance calculations
+                const osgb = proj4("EPSG:4326", "EPSG:27700", [lon, lat]);
+
+                return { 
+                    bng: { easting: Math.round(osgb[0]), northing: Math.round(osgb[1]) },
+                    latlon: [lat, lon] // Return standard lat/lon for map plotting
+                };
+            }
+
+            // --- Map Functions ---
+            function initMap(userLatLng, schools) {
+                mapContainer.classList.remove('hidden');
+                if (map) {
+                    map.remove();
+                }
+                
+                map = L.map('map').setView(userLatLng, 13);
+
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                }).addTo(map);
+
+                // User marker
+                L.marker(userLatLng, {
+                    icon: L.divIcon({
+                        className: 'user-marker',
+                        html: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 text-blue-600"><path fill-rule="evenodd" d="M11.54 22.351l.07.04.028.016a.76.76 0 00.723 0l.028-.015.071-.041a16.975 16.975 0 005.16-4.053l.076-.115a18.23 18.23 0 002.738-5.623l.032-.12a18.23 18.23 0 00-1.657-15.903l-.059-.065a18.23 18.23 0 00-26.615 0l-.059.065a18.23 18.23 0 00-1.657 15.903l.032.12a18.23 18.23 0 002.738 5.623l.076.115a16.975 16.975 0 005.16 4.053zM12 12.75a2.25 2.25 0 100-4.5 2.25 2.25 0 000 4.5z" clip-rule="evenodd" /></svg>',
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 32]
+                    })
+                }).addTo(map).bindPopup("<b>Your Address</b>").openPopup();
+
+                // School markers and lines
+                schools.slice(0, 10).forEach(school => { // Show top 10 closest
+                    // Convert school's BNG coordinates to Lat/Lon for plotting
+                    const schoolLatLng = proj4("EPSG:27700", "EPSG:4326", [school.easting, school.northing]).reverse();
+                    const popupContent = `<div class="school-popup-name">${school.name}</div>Distance: ${school.distance.toFixed(2)} miles`;
+                    L.marker(schoolLatLng).addTo(map).bindPopup(popupContent);
+
+                    L.polyline([userLatLng, schoolLatLng], { 
+                        color: 'rgba(59, 130, 246, 0.7)', 
+                        weight: 2,
+                        dashArray: '5, 5'
+                    }).addTo(map);
+                });
+            }
+
+            // --- UI Functions and Display Logic (Unchanged) ---
+            function showError(message) {
+                errorMessage.textContent = message;
+                errorMessage.classList.remove('hidden');
+            }
+
+            function hideError() {
+                errorMessage.classList.add('hidden');
+            }
+
+            function showLoading(isLoading) {
+                loadingIndicator.classList.toggle('hidden', !isLoading);
+            }
+
+            function calculateDistances(userBngCoords, schools) {
+                return schools.map(school => {
+                    const dx = school.easting - userBngCoords.easting;
+                    const dy = school.northing - userBngCoords.northing;
+                    const distanceMeters = Math.sqrt(dx * dx + dy * dy);
+                    const distanceMiles = distanceMeters / 1609.34;
+                    return { ...school, distance: distanceMiles };
+                }).sort((a, b) => a.distance - b.distance);
+            }
+
+            function displayResults(filteredSchools) {
+                const years = ["2025", "2024", "2023", "2022", "2021", "2020", "2019", "2018"];
+                let tableHTML = `
+                    <div class="overflow-x-auto bg-white rounded-2xl shadow-lg">
+                        <table class="min-w-full divide-y divide-gray-200 results-table">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">School</th>
+                                    <th scope="col" class="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Distance</th>
+                                    ${years.map(year => `<th scope="col" class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">${year}</th>`).join('')}
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">`;
+
+                filteredSchools.forEach(school => {
+                    tableHTML += `<tr>
+                                    <td data-label="School" class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${school.name}</td>
+                                    <td data-label="Distance" class="px-2 py-4 whitespace-nowrap text-sm text-gray-500">${school.distance.toFixed(2)} mi</td>`;
+
+                    years.forEach(year => {
+                        let cellContent = '<span class="text-gray-400 text-xs">No Data</span>';
+                        if (school.years[year] && school.years[year].cutoff !== undefined) {
+                            const { cutoff, distanceOffers } = school.years[year];
+                            const status = school.distance <= cutoff ? 'Yes' : 'No';
+                            const statusClasses = { 'Yes': 'text-green-600', 'No': 'text-red-600' };
+                            
+                            const cutoffText = (cutoff === Infinity || isNaN(cutoff)) ? 'N/A' : `${cutoff.toFixed(3)} mi`;
+                            const offersText = isNaN(distanceOffers) ? 'N/A' : distanceOffers;
+
+                            cellContent = `
+                                <div class="font-semibold ${statusClasses[status]}">${status}</div>
+                                <div class="text-xs text-gray-500 mt-1">Cutoff: ${cutoffText}</div>
+                                <div class="text-xs text-gray-500">Places: ${offersText}</div>
+                            `;
+                        }
+                         tableHTML += `<td data-label="${year}" class="px-3 py-4 whitespace-nowrap text-sm text-center">${cellContent}</td>`;
+                    });
+                    tableHTML += `</tr>`;
+                });
+                tableHTML += `</tbody></table></div>`;
+                resultsContainer.innerHTML = tableHTML;
+            }
+
+            // --- Event Listeners ---
+            // These are now safely inside the initializeApp function
+            checkButton.addEventListener('click', handleCheck);
+            addressInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    handleCheck();
+                }
+            });
+        }
+
+        // --- Attach the initializer to the window.onload event ---
+        window.onload = initializeApp;
+    </script>
+</body>
+</html>
